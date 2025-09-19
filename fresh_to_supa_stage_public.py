@@ -5,7 +5,7 @@ import argparse
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from html import unescape
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 
@@ -67,6 +67,34 @@ def parse_dt(s: Optional[str]) -> Optional[str]:
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return s.replace("T", " ").split(".")[0]
+
+def parse_dt_obj(s: Optional[str]) -> Optional[datetime]:
+    """Retorna datetime com tz UTC, ou None."""
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except Exception:
+        try:
+            return datetime.strptime(s.replace("T", " ").split(".")[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+def parse_date_ymd(s: Optional[str]) -> Optional[datetime]:
+    """Aceita 'YYYY-MM-DD' (sem hora) e devolve datetime UTC no início do dia."""
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
 
 def safe_filename(name: str) -> str:
     # limpa caracteres inválidos no Windows e limita tamanho
@@ -636,13 +664,36 @@ def build_message_row(conv: Dict[str, Any], ticket_id: int) -> Dict[str, Any]:
         "freshdesk_conv_id": conv.get("id"),
     }
 
+# ========== Filtro por período ==========
+
+def ticket_in_period(t: Dict[str, Any],
+                     created_from: Optional[datetime],
+                     created_to:   Optional[datetime],
+                     updated_from: Optional[datetime],
+                     updated_to:   Optional[datetime]) -> bool:
+    """
+    Retorna True se o ticket estiver dentro de TODOS os filtros informados.
+    Campos usados do ticket: created_at, updated_at (ISO do Freshdesk).
+    Intervalos inclusivos; *to* considera 23:59:59 do dia.
+    """
+    cdt = parse_dt_obj(t.get("created_at"))
+    udt = parse_dt_obj(t.get("updated_at"))
+
+    if created_from and (not cdt or cdt < created_from):
+        return False
+    if created_to and (not cdt or cdt > created_to):
+        return False
+
+    if updated_from and (not udt or udt < updated_from):
+        return False
+    if updated_to and (not udt or udt > updated_to):
+        return False
+
+    return True
+
 # ========== Coleta/Persistência de anexos ==========
 
 def collect_conversation_attachments(ticket: Dict[str, Any], max_mb: int = 15, download_dir: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Coleta metadados de anexos das conversations; se download_dir for informado, baixa os arquivos
-    em <download_dir>/<ticket_id>/<arquivo>.
-    """
     out: List[Dict[str, Any]] = []
     convs = ticket.get("conversations") or []
     max_bytes = max_mb * 1024 * 1024
@@ -707,15 +758,11 @@ def collect_conversation_attachments(ticket: Dict[str, Any], max_mb: int = 15, d
                 "stored_url": stored_url,
                 "stored_at": stored_at,
                 "sha256": digest,
-                "conv_id": conv_id,       # << para mapear depois no message_id
+                "conv_id": conv_id,
             })
     return out
 
 def collect_inline_from_description(html: Optional[str], ticket_id: Optional[int] = None, download_dir: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Coleta URLs inline da descrição; se download_dir for informado, baixa em <download_dir>/<ticket_id>/inline_<n>_<nome>.
-    Esses anexos inline NÃO pertencem a uma conversation específica -> conv_id = None
-    """
     out: List[Dict[str, Any]] = []
     if not html:
         return out
@@ -756,7 +803,7 @@ def collect_inline_from_description(html: Optional[str], ticket_id: Optional[int
             "stored_url": stored_url,
             "stored_at": stored_at,
             "sha256": digest,
-            "conv_id": None,            # sem conversation
+            "conv_id": None,
         })
     return out
 
@@ -809,10 +856,6 @@ def persist_contacts(db: MySQL, rows: List[Dict[str, Any]]):
     db.exec_many(CONTACT_UPSERT_SQL, rows)
 
 def persist_messages_return_map(db: MySQL, rows: List[Dict[str, Any]]) -> Dict[int, int]:
-    """
-    Insere/atualiza mensagens uma a uma para obter o 'id' (PK) de cada.
-    Retorna mapa: freshdesk_conv_id -> messages.id
-    """
     conv_to_msg: Dict[int, int] = {}
     if not rows:
         return conv_to_msg
@@ -836,6 +879,10 @@ def sync_tickets(
     page_size: int = 100,
     ticket_ids: Optional[List[int]] = None,
     download_dir: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_to: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
+    updated_to: Optional[datetime] = None,
 ):
     # 1) IDs alvo
     if ticket_ids:
@@ -843,11 +890,20 @@ def sync_tickets(
         print(f"[info] Tickets (IDs diretos): {len(found_ids)}")
     else:
         found_ids: List[int] = []
-        for t in fd_paginate_tickets(domain, api_key, per_page=page_size, page_start=1, updated_since=updated_since):
-            if "id" in t:
-                found_ids.append(int(t["id"]))
+        # Se houver updated_from, usamos no endpoint como 'updated_since' para reduzir tráfego
+        api_updated_since = None
+        if updated_from:
+            api_updated_since = updated_from.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif updated_since:
+            api_updated_since = updated_since  # compatibilidade com --since
+
+        for t in fd_paginate_tickets(domain, api_key, per_page=page_size, page_start=1, updated_since=api_updated_since):
+            if ticket_in_period(t, created_from, created_to, updated_from, updated_to):
+                if "id" in t:
+                    found_ids.append(int(t["id"]))
+
         if not found_ids:
-            print("[info] Nenhum ticket encontrado no filtro informado.")
+            print("[info] Nenhum ticket encontrado no período/filtro informado.")
             return
         print(f"[info] Tickets listados: {len(found_ids)}")
 
@@ -906,8 +962,6 @@ def sync_tickets(
         conv_to_msg: Dict[int, int] = {}
         if msg_rows:
             conv_to_msg = persist_messages_return_map(db, msg_rows)
-        else:
-            conv_to_msg = {}
 
         # ---- attachments
         if include_inline or inline_scrape:
@@ -944,6 +998,13 @@ def parse_args():
     p.add_argument("--ticket-id", type=int, action="append", help="ID de ticket específico (repetível)")
     p.add_argument("--ticket-ids", type=str, help="Lista de IDs separados por vírgula. Ex: --ticket-ids 123,456,789")
     p.add_argument("--download-dir", type=str, help="Se definido, baixa anexos para esta pasta (ex.: C:\\anexos_freshdesk_tickets)")
+
+    # NOVO: filtros por período (criação/atualização)
+    p.add_argument("--created-from", dest="created_from", help="YYYY-MM-DD (inclusive)")
+    p.add_argument("--created-to",   dest="created_to",   help="YYYY-MM-DD (inclusive)")
+    p.add_argument("--updated-from", dest="updated_from", help="YYYY-MM-DD (inclusive)")
+    p.add_argument("--updated-to",   dest="updated_to",   help="YYYY-MM-DD (inclusive)")
+
     return p.parse_args()
 
 def main():
@@ -966,6 +1027,17 @@ def main():
     include_inline = args.include_inline or include_inline_default
     inline_scrape  = args.inline_scrape  or inline_scrape_default
     download_dir = args.download_dir or env_or("DOWNLOAD_DIR")
+
+    # Filtros de período
+    created_from_dt = parse_date_ymd(args.created_from) if args.created_from else None
+    created_to_dt   = parse_date_ymd(args.created_to)   if args.created_to   else None
+    updated_from_dt = parse_date_ymd(args.updated_from) if args.updated_from else None
+    updated_to_dt   = parse_date_ymd(args.updated_to)   if args.updated_to   else None
+    # 'to' inclusivo até 23:59:59
+    if created_to_dt:
+        created_to_dt = created_to_dt.replace(hour=23, minute=59, second=59)
+    if updated_to_dt:
+        updated_to_dt = updated_to_dt.replace(hour=23, minute=59, second=59)
 
     # Checagens
     missing = []
@@ -1004,13 +1076,17 @@ def main():
         domain=fd_domain,
         api_key=fd_key,
         db=db,
-        updated_since=args.updated_since,
+        updated_since=args.updated_since,  # compat
         include_inline=include_inline,
         inline_scrape=inline_scrape,
         max_mb=args.max_attach_mb,
         page_size=page_size,
         ticket_ids=ids if ids else None,
         download_dir=download_dir,
+        created_from=created_from_dt,
+        created_to=created_to_dt,
+        updated_from=updated_from_dt,
+        updated_to=updated_to_dt,
     )
 
 if __name__ == "__main__":
