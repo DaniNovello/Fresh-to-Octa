@@ -1,1 +1,18 @@
+# Arquivos de ambiente com senhas e chaves de API
 .env
+*.env
+
+# Relatórios e logs gerados pelo script
+*.log
+*.csv
+
+# Cache e arquivos de sistema do Python
+__pycache__/
+*.pyc
+
+# Pastas com arquivos antigos, logs e downloads
+old/
+log/
+
+# Planilhas de dados e mapeamento
+octadesk_data.xlsx
