@@ -496,24 +496,24 @@ def main():
             handler.close()
             logger.removeHandler(handler)
 
-    # Move arquivos de log e de erros para a pasta 'old/'
-    logger.info("Movendo arquivos de log e de erros para a pasta 'old/'.")
+    # Move arquivos de log e de erros para a pasta 'log/'
+    logger.info("Movendo arquivos de log e de erros para a pasta 'log/'.")
     try:
-        old_dir = Path("old")
-        ensure_dir(old_dir)
+        log_dir = Path("log")
+        ensure_dir(log_dir)
 
         # Move arquivo de log, se existir
         if args.log_file and Path(args.log_file).exists():
-            shutil.move(args.log_file, old_dir / Path(args.log_file).name)
-            logger.info("Arquivo '%s' movido para 'old/'.", args.log_file)
+            shutil.move(args.log_file, log_dir / Path(args.log_file).name)
+            logger.info("Arquivo '%s' movido para 'log/'.", args.log_file)
 
         # Move arquivo de erros, se existir
         if args.errors_file and Path(args.errors_file).exists():
-            shutil.move(args.errors_file, old_dir / Path(args.errors_file).name)
-            logger.info("Arquivo '%s' movido para 'old/'.", args.errors_file)
+            shutil.move(args.errors_file, log_dir / Path(args.errors_file).name)
+            logger.info("Arquivo '%s' movido para 'log/'.", args.errors_file)
 
     except Exception as e:
-        logger.error("Erro ao mover arquivos para a pasta 'old/': %s", e)
+        logger.error("Erro ao mover arquivos para a pasta 'log/': %s", e)
     # >>> FIM  <<<
 
 if __name__ == "__main__":
