@@ -13,6 +13,7 @@ __pycache__/
 # Pastas com arquivos antigos, logs e downloads
 old/
 log/
+data/
 
 # Planilhas de dados e mapeamento
 octadesk_data.xlsx

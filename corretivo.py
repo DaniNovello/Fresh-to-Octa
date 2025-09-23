@@ -22,6 +22,9 @@ Requisitos-chave implementados:
 - Parâmetros CLI conforme especificado.
 
 Dependências sugeridas: requests, python-dotenv (opcional), openpyxl, mysql-connector-python
+
+
+Comando: python corretivo.py --errors-file .\errors_<mes>.csv --download-dir "C:\anexos_freshdesk_tickets" --min-attach-kb 0 --batch-size 400 --mapping-file .\data\octadesk_data.xlsx --log-file corretivo_<mes>.log
 """
 from __future__ import annotations
 
